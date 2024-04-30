@@ -3,31 +3,22 @@ import numpy as np
 import cv2 
 import matplotlib.pyplot as plt
 import os 
+import plotly.graph_objects as go
 
-
-class visualOd:
+class VisualOdometry:
     def __init__(self,folder,K):
     
-        self.imgs = []
+        self.imgs = [cv2.imread(os.path.join(folder, f))[:, :, ::-1] for f in sorted(os.listdir(folder))]
         self.keypoints = []
         self.descriptors = []
         self.matches = []
         self.K = K 
-        self.pose  = []
 
+        self.pose = [self.get_transform(np.eye(3), np.zeros(3))]
         #Setting the position of the referencer frame.
         cam0_position = np.dot(np.eye(3).T, - np.zeros((3,1))) 
         self.position = [cam0_position]
 
-
-        # Setting the initial pose 
-        cam0_pose = self.get_transform(np.eye(3),np.zeros((1,3))) # Creating a transformation matrix 
-        self.pose.append(cam0_pose)
-
-
-        for filename in sorted(os.listdir(folder)):
-            img = cv2.imread(os.path.join(folder,filename))[:,:,::-1]
-            self.imgs.append(img)
 
     def compute_matches(self):
         """ 
@@ -37,14 +28,13 @@ class visualOd:
         output: matchesi_i+1
         """
         bf = cv2.BFMatcher(crossCheck = True) 
-
         for i in range(0,len(self.imgs)-1):
             match = bf.match(self.descriptors[i],self.descriptors[i+1])
             match = np.array([(m.queryIdx,m.trainIdx) for m in match])
             self.matches.append(match) 
-
-
-    def get_transform(self,R,t):
+# 01,12,23,34,45,56,67,78,89,910,1011,1112,1213,1314,1415,1516,1617,1819
+    @staticmethod
+    def get_transform(R,t):
         """ 
         Computes the transformation matrix
         ----------------------
@@ -53,13 +43,11 @@ class visualOd:
         output: 
         """
         T = np.eye(4)
-        
         # Set the rotation part
         T[0:3, 0:3] = R
-        
         # Set the translation part
-        T[0:3, 3] = t.reshape(1,-1)
-        
+        T[0:3, 3] = t.flatten()
+    
         return T
             
     
@@ -70,30 +58,25 @@ class visualOd:
         output: all initial keypoints 
         """
 
-        for i in range(len(self.imgs)):
-                
-            img = self.imgs[i]
-            sift = cv2.SIFT_create(nfeatures = 2000 )
-            kp,des = sift.detectAndCompute(img,None) 
+        sift = cv2.SIFT_create(nfeatures = 2000 )
+        for img in self.imgs:
+            
+            kp, des = sift.detectAndCompute(img, None)
+            self.keypoints.append(np.array([k.pt for k in kp])[:2000])
+            self.descriptors.append(des[:2000]) 
 
-            kp = np.array([k.pt for k in kp])
 
-            kp = kp[:2000]
-            des = des[:2000]
-
-            self.keypoints.append(kp)
-            self.descriptors.append(des) 
 
     def get_position(self,i): 
         """ 
         Computes the position of camera_i 
-
         """
         T = self.pose[i]
         R,t = self.decompose_transformation_matrix(T)
-        position = R.T @ (-t) 
+        position = R.T @ (-t)
 
         return position 
+
 
 
     def recover_pose(self,i):
@@ -102,7 +85,6 @@ class visualOd:
         input: the i'th frame/image
         output:The essential matrix E, the mask
         """
-
         kp1 = self.keypoints[i]
         kp2 = self.keypoints[i+1]
 
@@ -110,18 +92,16 @@ class visualOd:
         matches12 = self.matches[i+1]
 
         E,mask = cv2.findEssentialMat(kp1[matches01[:,0]],kp2[matches01[:,1]],self.K,method=cv2.RANSAC)
-        _,R,t,mask_pose = cv2.recoverPose(E,kp1[matches01[:,0]],kp2[matches01[:,1]],self.K)  # Recover the pose of the second camera 
-        t = t
+        _,R,t,mask_pose = cv2.recoverPose(E,kp1[matches01[:,0]],kp2[matches01[:,1]],self.K,mask=mask)  # Recover the pose of the second camera 
         combined_mask = (mask*mask_pose).astype(bool).flatten() 
-
         self.matches[i] = matches01[combined_mask]
 
         pose = self.get_transform(R,t) 
         self.pose.append(pose)
-                
+
+
 
     def chain_feature_matches(self,i): 
-
         """
         Chains matches from image i to image i-2 through image i-1.
         
@@ -131,10 +111,9 @@ class visualOd:
         Returns:
         tuple: Tuple of three lists (points0, points1, points2) where each list contains the indices of matched points in the respective images.
         """
-
         matches01 = self.matches[i - 2]
         matches12 = self.matches[i - 1]  
-
+        
         _, idx01, idx12 = np.intersect1d(matches01[:,1], matches12[:,0], return_indices=True)
 
         kp0 = self.keypoints[i-2]
@@ -142,12 +121,13 @@ class visualOd:
         kp2 = self.keypoints[i]
 
         points0 = kp0[matches01[idx01,0]]
-        points1 = kp1[matches01[idx01,1]]
+        points1 = kp1[matches12[idx12,0]]
         points2 = kp2[matches12[idx12,1]]
 
-        return points0,points1,points2 
+        return points0,points1,points2
 
        
+
     def decompose_transformation_matrix(self,T):
         """
         Decompose a 4x4 transformation matrix to extract the rotation matrix R and translation vector t.
@@ -158,15 +138,14 @@ class visualOd:
         Returns:
         tuple: A tuple containing the rotation matrix R and the translation vector t.
         """
-
         # Extract the rotation matrix R (top-left 3x3 submatrix of T)
         R = T[:3, :3]
-        
         # Extract the translation vector t (first three elements of the fourth column of T)
         t = T[:3, 3]
         t = t.reshape(-1,1)
         
         return R, t
+
 
     def get_3D_objects(self,i,points0,points1): 
         """ 
@@ -177,23 +156,21 @@ class visualOd:
         outputs:
             - Q(ndarray) coordinates in homogenous coordinates
         """
-
         T0 = self.pose[i-2]
         T1 = self.pose[i-1]
 
         R0,t0 = self.decompose_transformation_matrix(T0)
         R1,t1 = self.decompose_transformation_matrix(T1)
     
-
         P0 = self.K @ np.hstack((R0,t0))
         P1 = self.K @ np.hstack((R1,t1)) 
 
         Q = cv2.triangulatePoints(P0,P1,points0.T,points1.T) #
-
         Q/= Q[3]  # Normalizing/dividing by w 
         Q = Q[:3].T.reshape(-1,1,3)
 
         return Q
+
 
 
     def estimatePose_pnp(self,imagePoints,Q):
@@ -210,14 +187,64 @@ class visualOd:
         self.pose.append(T) # appending to the list of transformations
         return R,tvec,inliers
         
-     
+    @staticmethod        
+    def plot_3d_points_and_cameras(Q, camera_positions, inliers):
         
+        """
+        Plots 3D points and camera positions using Plotly.
 
+        :param Q: Numpy array of 3D points, shape (3, N).
+        :param camera_positions: List of numpy arrays, each with shape (3,) representing camera positions.
+        :param inliers: Array or list of indices for the inlier points to be plotted.
+        """
+        inlier_Q = Q[inliers.flatten()]  # Select inliers and ensure the array is properly shaped
+        inlier_Q = inlier_Q.reshape(-1, 3)
 
+        fig = go.Figure()
 
+        # Add the triangulated 3D inlier points to the plot
+        fig.add_trace(go.Scatter3d(
+            x=inlier_Q[:, 0],  # X coordinates
+            y=inlier_Q[:, 1],  # Y coordinates
+            z=inlier_Q[:, 2],  # Z coordinates
+            mode='markers',
+            marker=dict(
+                size=2,
+                color='blue',  # Points color
+                opacity=0.8
+            ),
+            name='Triangulated Points'
+        ))
 
+        # Loop through the list of camera positions and add each to the plot
+        for i, pos in enumerate(camera_positions):
+            fig.add_trace(go.Scatter3d(
+                x=pos[0],
+                y=pos[1],
+                z=pos[2],
+                mode='markers',
+                marker=dict(
+                    size=5,
+                    color='green' if i == 0 else 'red',  # Use different colors for clarity, customize as needed
+                    opacity=0.8
+                ),
+                name=f'Camera {i} Position'
+            ))
 
+        # Configure the layout
+        fig.update_layout(
+            title='3D Point Cloud and Camera Positions',
+            scene=dict(
+                xaxis_title='X Axis',
+                yaxis_title='Y Axis',
+                zaxis_title='Z Axis',
+                xaxis=dict(showgrid=True, zeroline=False),
+                yaxis=dict(showgrid=True, zeroline=False),
+                zaxis=dict(showgrid=True, zeroline=False),
+                aspectmode='data'
+            ),
+            margin=dict(l=0, r=0, b=0, t=0)
+        )
 
-    
-
-
+        # Show the figure
+        fig.show()
