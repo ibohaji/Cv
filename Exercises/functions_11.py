@@ -13,7 +13,7 @@ class VisualOdometry:
         self.descriptors = []
         self.matches = []
         self.K = K 
-
+        self.feature_tracks = {}
         self.pose = [self.get_transform(np.eye(3), np.zeros(3))]
         #Setting the position of the referencer frame.
         cam0_position = np.dot(np.eye(3).T, - np.zeros((3,1))) 
@@ -32,7 +32,7 @@ class VisualOdometry:
             match = bf.match(self.descriptors[i],self.descriptors[i+1])
             match = np.array([(m.queryIdx,m.trainIdx) for m in match])
             self.matches.append(match) 
-# 01,12,23,34,45,56,67,78,89,910,1011,1112,1213,1314,1415,1516,1617,1819
+
     @staticmethod
     def get_transform(R,t):
         """ 
@@ -50,7 +50,8 @@ class VisualOdometry:
     
         return T
             
-    
+        
+
 
     def compute_keypoints(self): 
         """ 
@@ -58,12 +59,12 @@ class VisualOdometry:
         output: all initial keypoints 
         """
 
-        sift = cv2.SIFT_create(nfeatures = 2000 )
+        sift = cv2.SIFT_create(nfeatures = 4000 )
         for img in self.imgs:
             
             kp, des = sift.detectAndCompute(img, None)
-            self.keypoints.append(np.array([k.pt for k in kp])[:2000])
-            self.descriptors.append(des[:2000]) 
+            self.keypoints.append(np.array([k.pt for k in kp])[:4000])
+            self.descriptors.append(des[:4000]) 
 
 
 
@@ -91,7 +92,7 @@ class VisualOdometry:
         matches01 = self.matches[i]
         matches12 = self.matches[i+1]
 
-        E,mask = cv2.findEssentialMat(kp1[matches01[:,0]],kp2[matches01[:,1]],self.K,method=cv2.RANSAC)
+        E,mask = cv2.findEssentialMat(kp1[matches01[:,0]],kp2[matches01[:,1]],self.K,method=cv2.RANSAC,prob=0.999) # Compute the essential matrix between the two frames
         _,R,t,mask_pose = cv2.recoverPose(E,kp1[matches01[:,0]],kp2[matches01[:,1]],self.K,mask=mask)  # Recover the pose of the second camera 
         combined_mask = (mask*mask_pose).astype(bool).flatten() 
         self.matches[i] = matches01[combined_mask]
@@ -99,7 +100,21 @@ class VisualOdometry:
         pose = self.get_transform(R,t) 
         self.pose.append(pose)
 
+    """ Match Features Across Frames: Use feature matching algorithms, like FLANN or BFMatcher in OpenCV, to find correspondences of the same feature across multiple frames. You should already have a list of matches between consecutive frames (from exercises 11.1 to 11.5). Now you need to link these matches across the entire sequence of images.
+"""
 
+    def match_features_across_frames(self):
+        """
+        Matches features across all frames in the sequence.
+        """
+        bf = cv2.BFMatcher(crossCheck=True)
+        for i in range(1, len(self.imgs)):
+            matches = []
+            for j in range(i):
+                matches_ij = bf.match(self.descriptors[j], self.descriptors[i])
+                matches_ij = np.array([(m.queryIdx, m.trainIdx) for m in matches_ij])
+                matches.append(matches_ij)
+            self.matches.append(matches)
 
     def chain_feature_matches(self,i): 
         """
@@ -119,6 +134,7 @@ class VisualOdometry:
         kp0 = self.keypoints[i-2]
         kp1 = self.keypoints[i-1]
         kp2 = self.keypoints[i]
+
 
         points0 = kp0[matches01[idx01,0]]
         points1 = kp1[matches12[idx12,0]]
@@ -147,6 +163,29 @@ class VisualOdometry:
         return R, t
 
 
+    def get_3D_points(self,i): 
+        """ 
+        Obtains the 3D points from the i'th frame, by triangulating the points from image i to all the images for which all features are detectable 
+        """
+        matches = self.matches[i]
+        points = [] 
+        P = [] 
+
+        for i,match in enumerate(matches):
+            if match is not None: 
+                kp_i = self.keypoints[i]
+                point = kp_i[match[0]]
+                T = self.pose[i]
+                R,t = self.decompose_transformation_matrix(T)
+
+                P.append(self.K @ np.hstack((R,t)))
+                points.append(point)
+        Q = triangulate(P,points)
+
+        return Q
+
+# kp0[matches01[idx01,0]]
+
     def get_3D_objects(self,i,points0,points1): 
         """ 
         Obtains the 3D/world coordinates of the points between image i and i+1 
@@ -165,11 +204,14 @@ class VisualOdometry:
         P0 = self.K @ np.hstack((R0,t0))
         P1 = self.K @ np.hstack((R1,t1)) 
 
-        Q = cv2.triangulatePoints(P0,P1,points0.T,points1.T) #
+        Q = cv2.triangulatePoints(P0,P1,points0.T,points1.T) 
         Q/= Q[3]  # Normalizing/dividing by w 
         Q = Q[:3].T.reshape(-1,1,3)
 
         return Q
+
+
+
 
 
 
@@ -186,7 +228,33 @@ class VisualOdometry:
         T = self.get_transform(R,tvec) # Storing the pose as a transformation matrix
         self.pose.append(T) # appending to the list of transformations
         return R,tvec,inliers
-        
+    
+    
+    @staticmethod 
+    def triangulate(qn,pn):
+        """ 
+        input:
+        - qn: list of points
+        - pn: list of projection matrices
+        ----------------------
+        output:
+        - Q: 3D points
+        """
+        if len(qn) != len(pn):
+            raise ValueError("Expected lists of equal length, len(Q)!=len(pn)")
+
+        B_i = lambda P,q: np.array([  [P[2]*q[0] - P[0]],[P[2]*q[1] - P[1]]  ])
+
+        B = np.hstack(([B_i(P_i,Pi(q_i)) for P_i, q_i in zip(pn,qn)]))
+
+        B = B.reshape(len(pn)*2,4)
+        U,S,VT = np.linalg.svd(B)
+
+        Q = VT[-1,:]
+        return Q
+
+
+
     @staticmethod        
     def plot_3d_points_and_cameras(Q, camera_positions, inliers):
         
