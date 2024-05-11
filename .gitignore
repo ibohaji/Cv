@@ -3,3 +3,5 @@ cv/
 cvenv/cvenv/
 cvenv/
 vcenv/ 
+myenv/
+__pycache__/
